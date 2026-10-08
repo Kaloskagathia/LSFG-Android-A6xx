@@ -7,7 +7,7 @@ import android.util.Log
 import com.lsfg.android.shizuku.IShizukuCaptureService
 import com.lsfg.android.shizuku.IShizukuFrameCallback
 import com.topjohnwu.superuser.ipc.RootService
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 class RootCaptureService : RootService() {
 
@@ -15,7 +15,7 @@ class RootCaptureService : RootService() {
 
     inner class Impl : IShizukuCaptureService.Stub() {
 
-        private val running = AtomicBoolean(false)
+        private val generation = AtomicLong(0L)
         private var worker: Thread? = null
 
         override fun startCapture(
@@ -25,17 +25,18 @@ class RootCaptureService : RootService() {
             maxFps: Int,
             callback: IShizukuFrameCallback,
         ) {
-            stopCapture()
+            val session = generation.incrementAndGet()
+            worker?.interrupt()
+
             val periodMs = (1000L / maxFps.coerceIn(15, 120)).coerceAtLeast(8L)
-            running.set(true)
             worker = Thread(
-                { runCaptureLoop(targetUid, width, height, periodMs, callback) },
-                "lsfg-root-capture",
+                { runCaptureLoop(targetUid, width, height, periodMs, callback, session) },
+                "lsfg-root-capture-$session",
             ).also { it.start() }
         }
 
         override fun stopCapture() {
-            running.set(false)
+            generation.incrementAndGet()
             worker?.interrupt()
             worker = null
         }
@@ -54,19 +55,22 @@ class RootCaptureService : RootService() {
             height: Int,
             periodMs: Long,
             callback: IShizukuFrameCallback,
+            session: Long,
         ) {
             val capture = runCatching { PrivilegedScreenCapture(width, height, targetUid) }
                 .getOrElse { e ->
                     Log.w(TAG, "Unable to initialize privileged capture", e)
-                    callback.onError("Root capture unavailable: ${e.message ?: e.javaClass.simpleName}")
-                    running.set(false)
+                    if (generation.get() == session) {
+                        callback.onError("Root capture unavailable: ${e.message ?: e.javaClass.simpleName}")
+                        generation.compareAndSet(session, session + 1)
+                    }
                     return
                 }
 
             var lastFrameNs = 0L
             val targetPeriodNs = periodMs * 1_000_000L
             var frameLogCount = 0
-            while (running.get()) {
+            while (generation.get() == session) {
                 val started = SystemClock.uptimeMillis()
                 val hb = runCatching { capture.captureHardwareBuffer() }
                     .onFailure {
@@ -74,6 +78,11 @@ class RootCaptureService : RootService() {
                         callback.onError("Root capture failed: ${it.message ?: it.javaClass.simpleName}")
                     }
                     .getOrNull()
+
+                if (generation.get() != session) {
+                    runCatching { hb?.close() }
+                    break
+                }
 
                 if (hb != null) {
                     if (frameLogCount < 8) {
@@ -89,7 +98,7 @@ class RootCaptureService : RootService() {
                         callback.onFrame(hb, timestampNs)
                     } catch (t: Throwable) {
                         Log.w(TAG, "frame callback failed", t)
-                        running.set(false)
+                        generation.compareAndSet(session, session + 1)
                     } finally {
                         runCatching { hb.close() }
                     }
