@@ -3,6 +3,7 @@ package com.lsfg.android.session
 import android.graphics.PixelFormat
 import android.hardware.HardwareBuffer
 import android.os.IBinder
+import android.os.Parcel
 import android.util.Log
 import android.view.Display
 import java.lang.reflect.Method
@@ -109,6 +110,7 @@ internal class PrivilegedScreenCapture(
     }
 
     private fun findDisplayToken(): IBinder {
+        findDisplayTokenFromSurfaceFlingerAidl()?.let { return it }
         findDisplayTokenFromDisplayManagerGlobal()?.let { return it }
         findDisplayTokenFromDisplayService()?.let { return it }
 
@@ -120,6 +122,107 @@ internal class PrivilegedScreenCapture(
             findDisplayTokenFromDisplayControlClass(className, cls)?.let { return it }
         }
         throw IllegalStateException("No display token API is available")
+    }
+
+    private fun findDisplayTokenFromSurfaceFlingerAidl(): IBinder? {
+        return runCatching {
+            val serviceManager = Class.forName("android.os.ServiceManager")
+            val surfaceFlinger = serviceManager
+                .getMethod("getService", String::class.java)
+                .invoke(null, "SurfaceFlingerAIDL") as? IBinder
+                ?: throw IllegalStateException("SurfaceFlingerAIDL service unavailable")
+
+            val interfaceToken = "android.gui.ISurfaceComposer"
+
+            val idsData = Parcel.obtain()
+            val idsReply = Parcel.obtain()
+
+            val ids: LongArray
+
+            try {
+                idsData.writeInterfaceToken(interfaceToken)
+
+                val ok = surfaceFlinger.transact(
+                    IBinder.FIRST_CALL_TRANSACTION + 5,
+                    idsData,
+                    idsReply,
+                    0,
+                )
+
+                if (!ok) {
+                    throw IllegalStateException(
+                        "getPhysicalDisplayIds transact returned false"
+                    )
+                }
+
+                idsReply.readException()
+
+                ids = idsReply.createLongArray()
+                    ?: throw IllegalStateException(
+                        "getPhysicalDisplayIds returned null"
+                    )
+            } finally {
+                idsReply.recycle()
+                idsData.recycle()
+            }
+
+            if (ids.isEmpty()) {
+                throw IllegalStateException(
+                    "SurfaceFlingerAIDL returned no physical displays"
+                )
+            }
+
+            Log.i(
+                TAG,
+                "SurfaceFlingerAIDL physical displays: ${ids.joinToString()}"
+            )
+
+            for (id in ids) {
+                val tokenData = Parcel.obtain()
+                val tokenReply = Parcel.obtain()
+
+                try {
+                    tokenData.writeInterfaceToken(interfaceToken)
+                    tokenData.writeLong(id)
+
+                    val ok = surfaceFlinger.transact(
+                        IBinder.FIRST_CALL_TRANSACTION + 6,
+                        tokenData,
+                        tokenReply,
+                        0,
+                    )
+
+                    if (!ok) {
+                        continue
+                    }
+
+                    tokenReply.readException()
+
+                    val token = tokenReply.readStrongBinder()
+
+                    if (token != null) {
+                        Log.i(
+                            TAG,
+                            "Display token resolved from SurfaceFlingerAIDL for physical display $id"
+                        )
+                        return@runCatching token
+                    }
+                } finally {
+                    tokenReply.recycle()
+                    tokenData.recycle()
+                }
+            }
+
+            throw IllegalStateException(
+                "SurfaceFlingerAIDL returned no usable physical display token"
+            )
+        }.onFailure {
+            Log.w(
+                TAG,
+                "SurfaceFlingerAIDL display token unavailable",
+                it,
+            )
+        }.getOrNull()
     }
 
     private fun findDisplayTokenFromDisplayManagerGlobal(): IBinder? {
