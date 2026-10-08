@@ -29,13 +29,15 @@ jobs:
       - name: Show Android SDK
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
-          which sdkmanager
-          sdkmanager --version
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --version
 
       - name: Install Android components
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+
+          "$SDKMANAGER" \
             "platforms;android-35" \
             "build-tools;34.0.0" \
             "build-tools;35.0.0" \
