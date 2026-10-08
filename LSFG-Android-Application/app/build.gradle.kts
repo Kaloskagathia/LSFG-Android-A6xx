@@ -105,6 +105,8 @@ android {
         }
         debug {
             isMinifyEnabled = false
+            applicationIdSuffix = ".sfpatch"
+            versionNameSuffix = "-sfpatch"
         }
     }
 
